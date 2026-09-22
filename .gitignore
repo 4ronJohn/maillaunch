@@ -149,6 +149,8 @@ activemq-data/
 
 # Environments
 .env
+.env.*
+!.env.example
 .envrc
 .venv
 env/
@@ -156,6 +158,13 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+
+# MailLaunch local state and recipient data
+.maillaunch/
+*.db
+*.sqlite
+*.sqlite3
+recipients*.csv
 
 # Spyder project settings
 .spyderproject

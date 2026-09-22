@@ -1,0 +1,15 @@
+provider: gmail
+daily_limit: 100
+
+gmail:
+  client_id: ""
+  client_secret: ""
+
+microsoft:
+  client_id: ""
+
+send:
+  min_delay_seconds: 60
+  max_delay_seconds: 180
+  retry_failed: true
+  retry_attempts: 2
