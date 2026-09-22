@@ -41,6 +41,8 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("status", help="Show campaign status")
     resume = subparsers.add_parser("resume", help="Resume an interrupted campaign")
     resume.add_argument("campaign_id", nargs="?")
+    resume.add_argument("--min-delay", type=float)
+    resume.add_argument("--max-delay", type=float)
     subparsers.add_parser("log", help="Print today's send log")
     return parser
 
@@ -53,10 +55,20 @@ def _data_paths() -> tuple[Path, Path]:
 
 
 def _engine_settings(settings: Settings, args: argparse.Namespace) -> EngineSettings:
+    min_delay = getattr(args, "min_delay", None)
+    max_delay = getattr(args, "max_delay", None)
+    effective_min_delay = settings.send.min_delay_seconds if min_delay is None else min_delay
+    effective_max_delay = settings.send.max_delay_seconds if max_delay is None else max_delay
+
+    if effective_min_delay < 0 or effective_max_delay < 0:
+        raise ConfigError("send delay values cannot be negative")
+    if effective_max_delay < effective_min_delay:
+        raise ConfigError("send delay bounds are invalid")
+
     return EngineSettings(
         daily_limit=settings.daily_limit,
-        min_delay_seconds=settings.send.min_delay_seconds if args.min_delay is None else args.min_delay,
-        max_delay_seconds=settings.send.max_delay_seconds if args.max_delay is None else args.max_delay,
+        min_delay_seconds=effective_min_delay,
+        max_delay_seconds=effective_max_delay,
         retry_attempts=settings.send.retry_attempts,
         retry_failed=settings.send.retry_failed,
     )
@@ -169,7 +181,21 @@ def _status(settings: Settings) -> None:
 def _log() -> None:
     _, log_path = _data_paths()
     for event in SendLogger(log_path).read_events():
-        print(f"[{event['timestamp']}] {event['status']:<13} {event.get('email') or ''} | campaign: {event['campaign_id']}")
+        parts = [
+            f"[{event['timestamp']}]",
+            f"{event['status']:<13}",
+            f"{event.get('email') or ''}",
+            f"| name: {event.get('name') or ''}",
+            f"| campaign: {event['campaign_id']}",
+        ]
+
+        if event.get("attempt") is not None:
+            parts.append(f"| attempt: {event['attempt']}")
+
+        if event.get("error"):
+            parts.append(f"| error: {event['error']}")
+
+        print(" ".join(parts))
 
 
 def main() -> int:

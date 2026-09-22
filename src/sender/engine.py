@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import random
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -35,6 +36,8 @@ class SendingEngine:
         sleep: Callable[[float], None] = time.sleep,
         random_delay: Callable[[float, float], float] = random.uniform,
         refresh: Callable[[], bool] | None = None,
+        clock: Callable[[], float] = time.monotonic,
+        timer_interval: float = 0.1,
     ):
         self.database = database
         self.logger = logger
@@ -43,43 +46,178 @@ class SendingEngine:
         self.sleep = sleep
         self.random_delay = random_delay
         self.refresh = refresh
+        self.clock = clock
+        self.timer_interval = timer_interval
+
+    def _start_processing_timer(
+        self,
+    ) -> tuple[threading.Event, threading.Thread, float]:
+        stop_event = threading.Event()
+        started_at = self.clock()
+
+        def update() -> None:
+            while True:
+                elapsed = self.clock() - started_at
+                print(
+                    f"\rProcessing... {elapsed:.1f}s",
+                    end="",
+                    flush=True,
+                )
+                if stop_event.wait(self.timer_interval):
+                    return
+
+        timer = threading.Thread(target=update, daemon=True)
+        timer.start()
+        return stop_event, timer, started_at
+
+    def _stop_processing_timer(
+        self,
+        stop_event: threading.Event,
+        timer: threading.Thread,
+        started_at: float,
+    ) -> None:
+        stop_event.set()
+        timer.join()
+        elapsed = self.clock() - started_at
+        print(f"\rProcessing... {elapsed:.1f}s", flush=True)
 
     def run(self, campaign_id: str) -> None:
-        for recipient in self.database.pending_recipients(campaign_id):
+        recipients = list(self.database.pending_recipients(campaign_id))
+        total = len(recipients)
+
+        if total == 0:
+            self.database.set_campaign_status(campaign_id, "COMPLETE")
+            print("No pending recipients.")
+            return
+
+        campaign_started_at = self.clock()
+        for index, recipient in enumerate(recipients, start=1):
             if self.database.daily_sent_count() >= self.settings.daily_limit:
                 self.database.mark_limit_reached(campaign_id)
-                self.logger.record("LIMIT_REACHED", campaign_id=campaign_id)
+                self.logger.record(
+                    "LIMIT_REACHED",
+                    campaign_id=campaign_id,
+                )
+                print("\nDaily send limit reached.")
                 return
-            self._send_recipient(recipient)
-            if self.database.pending_recipients(campaign_id):
-                self.sleep(self.random_delay(self.settings.min_delay_seconds, self.settings.max_delay_seconds))
-        self.database.set_campaign_status(campaign_id, "COMPLETE")
 
-    def _send_recipient(self, recipient: CampaignRecipient) -> None:
-        max_attempts = 1 + (self.settings.retry_attempts if self.settings.retry_failed else 0)
+            print(f"\nSending {index}/{total}: {recipient.email}")
+            stop_event, timer, started_at = self._start_processing_timer()
+            try:
+                delay = self.random_delay(
+                    self.settings.min_delay_seconds,
+                    self.settings.max_delay_seconds,
+                )
+                self.sleep(delay)
+                success = self._send_recipient(recipient)
+            finally:
+                self._stop_processing_timer(stop_event, timer, started_at)
+
+            if success:
+                print(f"SENT: {recipient.email}")
+            else:
+                print(f"FAILED: {recipient.email}")
+
+        self.database.set_campaign_status(campaign_id, "COMPLETE")
+        print("\nCampaign completed.")
+        print(f"Total time: {self.clock() - campaign_started_at:.1f}s")
+
+    def _send_recipient(self, recipient: CampaignRecipient) -> bool:
+        max_attempts = 1 + (
+            self.settings.retry_attempts
+            if self.settings.retry_failed
+            else 0
+        )
         refreshed = False
-        for attempt in range(1, max_attempts + 1):
+
+        attempt = 1
+        while attempt <= max_attempts:
             self.database.mark_attempt(recipient.id)
+
             try:
                 self.provider(recipient)
+
             except SendError as error:
-                if error.auth_error and not refreshed and self.refresh is not None:
+                # Handle authentication errors by refreshing the token once.
+                if (
+                    error.auth_error
+                    and not refreshed
+                    and self.refresh is not None
+                ):
                     refreshed = True
+
                     if self.refresh():
+                        max_attempts += 1
+                        attempt += 1
                         continue
-                    self.database.mark_failed(recipient.id, str(error))
-                    self.logger.record("FAILED", campaign_id=recipient.campaign_id, email=recipient.email, name=recipient.name, error="authentication refresh failed", attempt=attempt)
-                    return
+
+                    self.database.mark_failed(
+                        recipient.id,
+                        str(error),
+                    )
+
+                    self.logger.record(
+                        "FAILED",
+                        campaign_id=recipient.campaign_id,
+                        email=recipient.email,
+                        name=recipient.name,
+                        error="authentication refresh failed",
+                        attempt=attempt,
+                    )
+
+                    return False
+
+                # Final failed attempt.
                 if attempt >= max_attempts:
-                    self.database.mark_failed(recipient.id, str(error))
-                    self.logger.record("FAILED", campaign_id=recipient.campaign_id, email=recipient.email, name=recipient.name, error=str(error), attempt=attempt)
-                    return
-                self.database.mark_retry(recipient.id, str(error))
+                    self.database.mark_failed(
+                        recipient.id,
+                        str(error),
+                    )
+
+                    self.logger.record(
+                        "FAILED",
+                        campaign_id=recipient.campaign_id,
+                        email=recipient.email,
+                        name=recipient.name,
+                        error=str(error),
+                        attempt=attempt,
+                    )
+
+                    return False
+
+                # Retry with exponential backoff.
+                self.database.mark_retry(
+                    recipient.id,
+                    str(error),
+                )
+
                 delay = 2 ** (attempt - 1)
-                self.logger.record("RETRY", campaign_id=recipient.campaign_id, email=recipient.email, name=recipient.name, error=str(error), attempt=attempt)
+
+                self.logger.record(
+                    "RETRY",
+                    campaign_id=recipient.campaign_id,
+                    email=recipient.email,
+                    name=recipient.name,
+                    error=str(error),
+                    attempt=attempt,
+                )
+
                 self.sleep(delay)
+
+                attempt += 1
                 continue
+
             else:
                 self.database.mark_sent(recipient.id)
-                self.logger.record("SENT", campaign_id=recipient.campaign_id, email=recipient.email, name=recipient.name, attempt=attempt)
-                return
+
+                self.logger.record(
+                    "SENT",
+                    campaign_id=recipient.campaign_id,
+                    email=recipient.email,
+                    name=recipient.name,
+                    attempt=attempt,
+                )
+
+                return True
+
+        return False

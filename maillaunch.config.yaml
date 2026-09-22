@@ -9,7 +9,7 @@ microsoft:
   client_id: ""
 
 send:
-  min_delay_seconds: 60
-  max_delay_seconds: 180
+  min_delay_seconds: 2
+  max_delay_seconds: 5
   retry_failed: true
   retry_attempts: 2

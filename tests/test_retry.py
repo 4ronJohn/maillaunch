@@ -24,6 +24,6 @@ def test_retry_uses_exponential_backoff_and_succeeds(tmp_path):
     )
     engine.run(campaign_id)
     assert len(attempts) == 3
-    assert sleeps[:2] == [1, 2]
+    assert sleeps == [0, 1, 2]
     assert database.summary(campaign_id) == {"SENT": 1}
     database.close()
