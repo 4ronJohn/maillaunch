@@ -23,6 +23,7 @@ class EngineSettings:
     max_delay_seconds: float = 180
     retry_attempts: int = 2
     retry_failed: bool = True
+    provider: str = "gmail"
 
 
 class SendingEngine:
@@ -63,11 +64,13 @@ class SendingEngine:
                     end="",
                     flush=True,
                 )
+
                 if stop_event.wait(self.timer_interval):
                     return
 
         timer = threading.Thread(target=update, daemon=True)
         timer.start()
+
         return stop_event, timer, started_at
 
     def _stop_processing_timer(
@@ -78,6 +81,7 @@ class SendingEngine:
     ) -> None:
         stop_event.set()
         timer.join()
+
         elapsed = self.clock() - started_at
         print(f"\rProcessing... {elapsed:.1f}s", flush=True)
 
@@ -91,27 +95,39 @@ class SendingEngine:
             return
 
         campaign_started_at = self.clock()
+
         for index, recipient in enumerate(recipients, start=1):
             if self.database.daily_sent_count() >= self.settings.daily_limit:
                 self.database.mark_limit_reached(campaign_id)
+
                 self.logger.record(
                     "LIMIT_REACHED",
                     campaign_id=campaign_id,
+                    provider=self.settings.provider,
                 )
+
                 print("\nDaily send limit reached.")
                 return
 
             print(f"\nSending {index}/{total}: {recipient.email}")
+
             stop_event, timer, started_at = self._start_processing_timer()
+
             try:
                 delay = self.random_delay(
                     self.settings.min_delay_seconds,
                     self.settings.max_delay_seconds,
                 )
+
                 self.sleep(delay)
                 success = self._send_recipient(recipient)
+
             finally:
-                self._stop_processing_timer(stop_event, timer, started_at)
+                self._stop_processing_timer(
+                    stop_event,
+                    timer,
+                    started_at,
+                )
 
             if success:
                 print(f"SENT: {recipient.email}")
@@ -119,6 +135,7 @@ class SendingEngine:
                 print(f"FAILED: {recipient.email}")
 
         self.database.set_campaign_status(campaign_id, "COMPLETE")
+
         print("\nCampaign completed.")
         print(f"Total time: {self.clock() - campaign_started_at:.1f}s")
 
@@ -128,9 +145,10 @@ class SendingEngine:
             if self.settings.retry_failed
             else 0
         )
-        refreshed = False
 
+        refreshed = False
         attempt = 1
+
         while attempt <= max_attempts:
             self.database.mark_attempt(recipient.id)
 
@@ -163,6 +181,7 @@ class SendingEngine:
                         name=recipient.name,
                         error="authentication refresh failed",
                         attempt=attempt,
+                        provider=self.settings.provider,
                     )
 
                     return False
@@ -181,6 +200,7 @@ class SendingEngine:
                         name=recipient.name,
                         error=str(error),
                         attempt=attempt,
+                        provider=self.settings.provider,
                     )
 
                     return False
@@ -200,6 +220,7 @@ class SendingEngine:
                     name=recipient.name,
                     error=str(error),
                     attempt=attempt,
+                    provider=self.settings.provider,
                 )
 
                 self.sleep(delay)
@@ -216,6 +237,7 @@ class SendingEngine:
                     email=recipient.email,
                     name=recipient.name,
                     attempt=attempt,
+                    provider=self.settings.provider,
                 )
 
                 return True

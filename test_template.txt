@@ -1,8 +1,0 @@
-Hi {{name}},
-
-This is a test email from MailLaunch.
-
-Company: {{company}}
-
-Best regards,
-Aron

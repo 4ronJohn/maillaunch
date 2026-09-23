@@ -20,6 +20,14 @@ class CampaignRecipient:
     error: str | None
 
 
+@dataclass(frozen=True)
+class ScheduledCampaign:
+    campaign_id: str
+    scheduled_at: str
+    min_delay_seconds: float
+    max_delay_seconds: float
+
+
 class CampaignDatabase:
     def __init__(self, path: str | Path):
         self.path = Path(path)
@@ -51,8 +59,36 @@ class CampaignDatabase:
                 ON recipients(campaign_id, status);
             CREATE INDEX IF NOT EXISTS idx_recipient_sent_at
                 ON recipients(sent_at);
+            CREATE TABLE IF NOT EXISTS scheduled_campaigns (
+                campaign_id TEXT PRIMARY KEY REFERENCES campaigns(id),
+                scheduled_at TEXT NOT NULL,
+                min_delay_seconds REAL NOT NULL,
+                max_delay_seconds REAL NOT NULL
+            );
             """
         )
+        columns = {
+            row["name"]
+            for row in self.connection.execute("PRAGMA table_info(scheduled_campaigns)")
+        }
+        if "task_name" in columns:
+            self.connection.executescript(
+                """
+                ALTER TABLE scheduled_campaigns RENAME TO scheduled_campaigns_legacy;
+                CREATE TABLE scheduled_campaigns (
+                    campaign_id TEXT PRIMARY KEY REFERENCES campaigns(id),
+                    scheduled_at TEXT NOT NULL,
+                    min_delay_seconds REAL NOT NULL,
+                    max_delay_seconds REAL NOT NULL
+                );
+                INSERT INTO scheduled_campaigns(
+                    campaign_id, scheduled_at, min_delay_seconds, max_delay_seconds
+                )
+                SELECT campaign_id, scheduled_at, min_delay_seconds, max_delay_seconds
+                FROM scheduled_campaigns_legacy;
+                DROP TABLE scheduled_campaigns_legacy;
+                """
+            )
         self.connection.commit()
 
     def close(self) -> None:
@@ -125,6 +161,64 @@ class CampaignDatabase:
                 (campaign_id,),
             )
 
+    def schedule_campaign(
+        self,
+        campaign_id: str,
+        scheduled_at: str,
+        min_delay_seconds: float,
+        max_delay_seconds: float,
+    ) -> None:
+        with self.connection:
+            self.connection.execute(
+                """
+                INSERT INTO scheduled_campaigns(
+                    campaign_id, scheduled_at,
+                    min_delay_seconds, max_delay_seconds
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (
+                    campaign_id,
+                    scheduled_at,
+                    min_delay_seconds,
+                    max_delay_seconds,
+                ),
+            )
+            self.connection.execute(
+                "UPDATE campaigns SET status = 'SCHEDULED' WHERE id = ?",
+                (campaign_id,),
+            )
+
+    def scheduled_campaign(self, campaign_id: str) -> ScheduledCampaign | None:
+        row = self.connection.execute(
+            """
+                 SELECT campaign_id, scheduled_at,
+                   min_delay_seconds, max_delay_seconds
+            FROM scheduled_campaigns
+            WHERE campaign_id = ?
+            """,
+            (campaign_id,),
+        ).fetchone()
+        return ScheduledCampaign(**dict(row)) if row else None
+
+    def start_scheduled_campaign(self, campaign_id: str) -> bool:
+        with self.connection:
+            cursor = self.connection.execute(
+                """
+                UPDATE campaigns
+                SET status = 'PENDING'
+                WHERE id = ? AND status = 'SCHEDULED'
+                """,
+                (campaign_id,),
+            )
+        return cursor.rowcount == 1
+
+    def delete_scheduled_campaign(self, campaign_id: str) -> None:
+        with self.connection:
+            self.connection.execute(
+                "DELETE FROM scheduled_campaigns WHERE campaign_id = ?",
+                (campaign_id,),
+            )
+
     def set_campaign_status(self, campaign_id: str, status: str) -> None:
         with self.connection:
             self.connection.execute("UPDATE campaigns SET status = ? WHERE id = ?", (status, campaign_id))
@@ -156,7 +250,7 @@ class CampaignDatabase:
             """
             SELECT c.id FROM campaigns c
             JOIN recipients r ON r.campaign_id = c.id
-            WHERE r.status IN ('PENDING', 'RETRY')
+            WHERE r.status IN ('PENDING', 'RETRY') AND c.status != 'SCHEDULED'
             ORDER BY c.created_at DESC LIMIT 1
             """
         ).fetchone()
