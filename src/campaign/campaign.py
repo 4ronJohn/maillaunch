@@ -6,9 +6,16 @@ from utils.csv_parser import Recipient
 from utils.template import render_template
 
 
-def build_messages(recipients: Iterable[Recipient], subject: str, body: str) -> list[dict[str, str]]:
+# Build personalized messages for each recipient.
+def build_messages(
+    recipients: Iterable[Recipient],
+    subject: str,
+    body: str,
+) -> list[dict[str, str]]:
     messages: list[dict[str, str]] = []
+
     for recipient in recipients:
+        # Replace template variables with recipient data.
         messages.append(
             {
                 "email": recipient.email,
@@ -17,4 +24,5 @@ def build_messages(recipients: Iterable[Recipient], subject: str, body: str) -> 
                 "body": render_template(body, recipient.values),
             }
         )
+
     return messages

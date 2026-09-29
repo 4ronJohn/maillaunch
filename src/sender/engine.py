@@ -10,12 +10,14 @@ from campaign.database import CampaignDatabase, CampaignRecipient
 from utils.logger import SendLogger
 
 
+# Error raised when sending an email fails.
 class SendError(Exception):
     def __init__(self, message: str, *, auth_error: bool = False):
         super().__init__(message)
         self.auth_error = auth_error
 
 
+# Settings used by the sending engine.
 @dataclass(frozen=True)
 class EngineSettings:
     daily_limit: int = 100
@@ -50,6 +52,7 @@ class SendingEngine:
         self.clock = clock
         self.timer_interval = timer_interval
 
+    # Start the processing timer shown while an email is being processed.
     def _start_processing_timer(
         self,
     ) -> tuple[threading.Event, threading.Thread, float]:
@@ -73,6 +76,7 @@ class SendingEngine:
 
         return stop_event, timer, started_at
 
+    # Stop the processing timer and display the final processing time.
     def _stop_processing_timer(
         self,
         stop_event: threading.Event,
@@ -86,6 +90,7 @@ class SendingEngine:
         print(f"\rProcessing... {elapsed:.1f}s", flush=True)
 
     def run(self, campaign_id: str) -> None:
+        # Get all recipients that still need to be sent.
         recipients = list(self.database.pending_recipients(campaign_id))
         total = len(recipients)
 
@@ -97,6 +102,7 @@ class SendingEngine:
         campaign_started_at = self.clock()
 
         for index, recipient in enumerate(recipients, start=1):
+            # Stop sending when the daily limit is reached.
             if self.database.daily_sent_count() >= self.settings.daily_limit:
                 self.database.mark_limit_reached(campaign_id)
 
@@ -114,6 +120,7 @@ class SendingEngine:
             stop_event, timer, started_at = self._start_processing_timer()
 
             try:
+                # Wait for a random delay before sending.
                 delay = self.random_delay(
                     self.settings.min_delay_seconds,
                     self.settings.max_delay_seconds,
@@ -140,6 +147,7 @@ class SendingEngine:
         print(f"Total time: {self.clock() - campaign_started_at:.1f}s")
 
     def _send_recipient(self, recipient: CampaignRecipient) -> bool:
+        # Calculate the maximum number of sending attempts.
         max_attempts = 1 + (
             self.settings.retry_attempts
             if self.settings.retry_failed

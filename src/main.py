@@ -1,3 +1,4 @@
+# Command-line interface and application orchestration for MailLaunch.
 from __future__ import annotations
 
 import argparse
@@ -137,7 +138,6 @@ def _data_paths(
 
     return database, log
 
-
 def _engine_settings(
     settings: Settings,
     args: argparse.Namespace,
@@ -146,6 +146,7 @@ def _engine_settings(
     min_delay: float | None = None,
     max_delay: float | None = None,
 ) -> EngineSettings:
+    # Build effective sending settings from YAML configuration and CLI overrides.
     cli_min_delay = getattr(
         args,
         "min_delay",
@@ -176,6 +177,7 @@ def _engine_settings(
     if max_delay is not None:
         effective_max_delay = max_delay
 
+    # CLI values override YAML settings when explicitly provided.
     if effective_min_delay < 0 or effective_max_delay < 0:
         raise ConfigError(
             "send delay values cannot be negative"
@@ -185,6 +187,7 @@ def _engine_settings(
         raise ConfigError(
             "send delay bounds are invalid"
         )
+
 
     return EngineSettings(
         daily_limit=settings.daily_limit,
@@ -344,6 +347,7 @@ def _wait_until_scheduled(
 
 
 def _run_campaign(
+    # Create the sending engine and execute the campaign.
     database: CampaignDatabase,
     log_path: Path,
     campaign_id: str,
@@ -383,6 +387,7 @@ def _run_campaign(
 
 
 def _send(
+    # Create a campaign from the CSV recipients and email template.
     args: argparse.Namespace,
     settings: Settings,
 ) -> None:

@@ -7,6 +7,7 @@ from pathlib import Path
 from uuid import uuid4
 
 
+# Recipient data stored in the database.
 @dataclass(frozen=True)
 class CampaignRecipient:
     id: int
@@ -20,6 +21,7 @@ class CampaignRecipient:
     error: str | None
 
 
+# Scheduled campaign data stored in the database.
 @dataclass(frozen=True)
 class ScheduledCampaign:
     campaign_id: str
@@ -35,6 +37,8 @@ class CampaignDatabase:
         self.connection = sqlite3.connect(self.path)
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA foreign_keys = ON")
+
+        # Create the database tables and indexes if they don't exist.
         self.connection.executescript(
             """
             CREATE TABLE IF NOT EXISTS campaigns (
@@ -67,11 +71,15 @@ class CampaignDatabase:
             );
             """
         )
+
+        # Check for the old scheduled campaign schema.
         columns = {
             row["name"]
             for row in self.connection.execute("PRAGMA table_info(scheduled_campaigns)")
         }
+
         if "task_name" in columns:
+            # Migrate the old scheduled campaign table to the current schema.
             self.connection.executescript(
                 """
                 ALTER TABLE scheduled_campaigns RENAME TO scheduled_campaigns_legacy;
@@ -89,14 +97,17 @@ class CampaignDatabase:
                 DROP TABLE scheduled_campaigns_legacy;
                 """
             )
+
         self.connection.commit()
 
     def close(self) -> None:
         self.connection.close()
 
+    # Create a campaign and store its recipients.
     def create_campaign(self, provider: str, messages: list[dict[str, str]]) -> str:
         campaign_id = f"c_{datetime.now(timezone.utc):%Y%m%d_%H%M%S}_{uuid4().hex[:6]}"
         created_at = datetime.now(timezone.utc).isoformat()
+
         with self.connection:
             self.connection.execute(
                 "INSERT INTO campaigns(id, provider, created_at) VALUES (?, ?, ?)",
@@ -112,8 +123,10 @@ class CampaignDatabase:
                     for item in messages
                 ],
             )
+
         return campaign_id
 
+    # Get recipients that are waiting to be sent or retried.
     def pending_recipients(self, campaign_id: str) -> list[CampaignRecipient]:
         rows = self.connection.execute(
             """
@@ -124,8 +137,10 @@ class CampaignDatabase:
             """,
             (campaign_id,),
         ).fetchall()
+
         return [CampaignRecipient(**dict(row)) for row in rows]
 
+    # Increment the recipient's attempt count.
     def mark_attempt(self, recipient_id: int) -> None:
         with self.connection:
             self.connection.execute(
@@ -133,6 +148,7 @@ class CampaignDatabase:
                 (recipient_id,),
             )
 
+    # Mark a recipient as successfully sent.
     def mark_sent(self, recipient_id: int) -> None:
         with self.connection:
             self.connection.execute(
@@ -140,6 +156,7 @@ class CampaignDatabase:
                 (datetime.now(timezone.utc).isoformat(), recipient_id),
             )
 
+    # Mark a recipient as permanently failed.
     def mark_failed(self, recipient_id: int, error: str) -> None:
         with self.connection:
             self.connection.execute(
@@ -147,6 +164,7 @@ class CampaignDatabase:
                 (error, recipient_id),
             )
 
+    # Mark a recipient for another attempt.
     def mark_retry(self, recipient_id: int, error: str) -> None:
         with self.connection:
             self.connection.execute(
@@ -154,6 +172,7 @@ class CampaignDatabase:
                 (error, recipient_id),
             )
 
+    # Mark a campaign as having reached the daily limit.
     def mark_limit_reached(self, campaign_id: str) -> None:
         with self.connection:
             self.connection.execute(
@@ -161,6 +180,7 @@ class CampaignDatabase:
                 (campaign_id,),
             )
 
+    # Schedule a campaign for a future time.
     def schedule_campaign(
         self,
         campaign_id: str,
@@ -188,6 +208,7 @@ class CampaignDatabase:
                 (campaign_id,),
             )
 
+    # Get the scheduled details for a campaign.
     def scheduled_campaign(self, campaign_id: str) -> ScheduledCampaign | None:
         row = self.connection.execute(
             """
@@ -198,8 +219,10 @@ class CampaignDatabase:
             """,
             (campaign_id,),
         ).fetchone()
+
         return ScheduledCampaign(**dict(row)) if row else None
 
+    # Move a scheduled campaign back to pending.
     def start_scheduled_campaign(self, campaign_id: str) -> bool:
         with self.connection:
             cursor = self.connection.execute(
@@ -210,8 +233,10 @@ class CampaignDatabase:
                 """,
                 (campaign_id,),
             )
+
         return cursor.rowcount == 1
 
+    # Remove the schedule for a campaign.
     def delete_scheduled_campaign(self, campaign_id: str) -> None:
         with self.connection:
             self.connection.execute(
@@ -219,32 +244,43 @@ class CampaignDatabase:
                 (campaign_id,),
             )
 
+    # Update the current campaign status.
     def set_campaign_status(self, campaign_id: str, status: str) -> None:
         with self.connection:
             self.connection.execute("UPDATE campaigns SET status = ? WHERE id = ?", (status, campaign_id))
 
+    # Get the email provider used by a campaign.
     def campaign_provider(self, campaign_id: str) -> str:
         row = self.connection.execute("SELECT provider FROM campaigns WHERE id = ?", (campaign_id,)).fetchone()
+
         if row is None:
             raise ValueError(f"campaign not found: {campaign_id}")
+
         return str(row["provider"])
 
+    # Count emails successfully sent on a specific day.
     def daily_sent_count(self, day: date | None = None) -> int:
         target = (day or date.today()).isoformat()
+
         row = self.connection.execute(
             "SELECT COUNT(*) AS count FROM recipients WHERE status = 'SENT' AND sent_at LIKE ?",
             (f"{target}%",),
         ).fetchone()
+
         return int(row["count"])
 
+    # Return recipient counts grouped by status.
     def summary(self, campaign_id: str | None = None) -> dict[str, int]:
         where = "WHERE campaign_id = ?" if campaign_id else ""
         args = (campaign_id,) if campaign_id else ()
+
         rows = self.connection.execute(
             f"SELECT status, COUNT(*) AS count FROM recipients {where} GROUP BY status", args
         ).fetchall()
+
         return {row["status"]: int(row["count"]) for row in rows}
 
+    # Find the most recent campaign that can be resumed.
     def resumable_campaign(self) -> str | None:
         row = self.connection.execute(
             """
@@ -254,4 +290,5 @@ class CampaignDatabase:
             ORDER BY c.created_at DESC LIMIT 1
             """
         ).fetchone()
+
         return row["id"] if row else None
